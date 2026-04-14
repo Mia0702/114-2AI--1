@@ -240,26 +240,33 @@ export default function App() {
   };
 
   const checkAvailability = (roomTypeId, checkIn, checkOut, bookingId = null) => {
-    const selectedRoomType = effectiveRoomTypes.find((r) => r.id === roomTypeId);
-    if (!selectedRoomType) return 0;
-    if ((selectedRoomType.status || '開放') !== '開放') return 0;
+  const selectedRoomType = effectiveRoomTypes.find((r) => r.id === roomTypeId);
+  if (!selectedRoomType) return 0;
 
-    const totalRooms = parseInt(selectedRoomType.totalRooms || 0, 10);
-    const start = new Date(checkIn);
-    const end = new Date(checkOut);
+  const totalRooms = parseInt(selectedRoomType.totalRooms || 0, 10);
+  const start = new Date(checkIn);
+  const end = new Date(checkOut);
 
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-      return totalRooms;
-    }
+  // 日期不完整時，直接回傳總房數
+  if (!checkIn || !checkOut || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return totalRooms;
+  }
 
-    const overlapping = bookings.filter((b) => {
-      if (b.roomTypeId !== roomTypeId || b.status === '已取消' || b.status === '已退房') return false;
-      if (bookingId && b.id === bookingId) return false;
-      return start < new Date(b.checkOutDate) && end > new Date(b.checkInDate);
-    });
+  // 比對日期重疊且未取消的訂單
+  const overlappingBookings = bookings.filter((booking) => {
+    if (booking.roomTypeId !== roomTypeId) return false;
+    if (booking.status === '已取消') return false;
+    if (bookingId && booking.id === bookingId) return false;
 
-    return Math.max(0, totalRooms - overlapping.length);
-  };
+    const bookingCheckIn = new Date(booking.checkInDate);
+    const bookingCheckOut = new Date(booking.checkOutDate);
+
+    return start < bookingCheckOut && end > bookingCheckIn;
+  });
+
+  const remainingRooms = totalRooms - overlappingBookings.length;
+  return Math.max(0, remainingRooms);
+};
 
   if (loading) {
     return (
@@ -679,34 +686,54 @@ function BookingFormView({ roomTypes, checkAvailability, toast, setView, initial
       : null;
 
   const handleSubmit = async (e) => {
-    e.preventDefault();
+  e.preventDefault();
 
-    if (!formData.roomTypeId) return toast("請先選擇房型", "error");
-    if (!formData.guestName.trim()) return toast("請輸入住客姓名", "error");
-    if (!/^09\d{8}$/.test(formData.phone.replace(/[^0-9]/g, ''))) return toast("電話格式不正確", "error");
-    if (!formData.checkInDate || !formData.checkOutDate) return toast("請選擇入住與退房日期", "error");
-    if (new Date(formData.checkOutDate) <= new Date(formData.checkInDate)) return toast("退房日期必須晚於入住日期", "error");
-    if (!selectedRoom) return toast("請選擇有效房型", "error");
-    if ((selectedRoom.status || '開放') !== '開放') return toast("此房型目前不可預訂", "error");
-    if (Number(formData.guests) > Number(selectedRoom.capacity)) return toast("入住人數超過房型限制", "error");
+  if (!formData.roomTypeId) return toast("請先選擇房型", "error");
+  if (!formData.guestName.trim()) return toast("請輸入住客姓名", "error");
+  if (!formData.phone.trim()) return toast("請輸入聯絡電話", "error");
+  if (!formData.checkInDate || !formData.checkOutDate) return toast("請選擇入住與退房日期", "error");
+  if (new Date(formData.checkOutDate) <= new Date(formData.checkInDate)) {
+    return toast("退房日期必須晚於入住日期", "error");
+  }
 
-    const remain = checkAvailability(formData.roomTypeId, formData.checkInDate, formData.checkOutDate);
-    if (remain <= 0) return toast("該時段已無空房，已阻止重複訂房", "error");
+  const room = roomTypes.find((r) => r.id === formData.roomTypeId);
+  if (!room) return toast("請選擇有效房型", "error");
 
-    try {
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'bookings'), {
-        ...formData,
-        guests: Number(formData.guests),
-        roomTypeName: selectedRoom.name,
-        status: '已預訂',
-        createdAt: new Date().toISOString()
-      });
-      toast("訂房成功！");
-      setView('my-bookings');
-    } catch (err) {
-      toast("訂房失敗", "error");
-    }
-  };
+  if (Number(formData.guests) > Number(room.capacity)) {
+    return toast("人數超過房型限制", "error");
+  }
+
+  // 核心防呆：檢查剩餘房間數
+  const availableCount = checkAvailability(
+    formData.roomTypeId,
+    formData.checkInDate,
+    formData.checkOutDate
+  );
+
+  if (availableCount <= 0) {
+    return toast("該房型此時段已滿房，無法重複訂房", "error");
+  }
+
+  try {
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'bookings'), {
+      ...formData,
+      guests: Number(formData.guests),
+      roomTypeName: room.name,
+      status: '已預訂',
+      createdAt: new Date().toISOString()
+    });
+
+    toast("訂房成功！");
+    setView('my-bookings');
+  } catch (err) {
+    toast("訂房失敗", "error");
+  }
+};
+  
+  const currentAvailableCount =
+  formData.roomTypeId && formData.checkInDate && formData.checkOutDate
+    ? checkAvailability(formData.roomTypeId, formData.checkInDate, formData.checkOutDate)
+    : null;
 
   return (
     <div className="space-y-6">
@@ -824,6 +851,18 @@ function BookingFormView({ roomTypes, checkAvailability, toast, setView, initial
               value={formData.note}
               onChange={(e) => setFormData({ ...formData, note: e.target.value })}
             />
+          </div>
+
+          <div className="md:col-span-2">
+            <div className="bg-slate-50 rounded-2xl px-6 py-4 border border-slate-200">
+              <p className="text-sm font-bold text-slate-600">
+                {currentAvailableCount === null
+                  ? "請先選擇房型與日期，系統將自動檢查剩餘房間數。"
+                  : currentAvailableCount > 0
+                    ? `目前剩餘空房：${currentAvailableCount} 間`
+                    : "此房型在所選日期已滿房，系統將阻止訂房。"}
+              </p>
+            </div>
           </div>
 
           <div className="md:col-span-2">
